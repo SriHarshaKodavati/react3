@@ -1,0 +1,114 @@
+// Add these methods to your existing ApiService class
+
+class ApiService {
+  // ... existing methods ...
+
+  async createPayrollBatch(transactions) {
+    const response = await fetch(`${API_BASE_URL}/payroll2/create-batch`, {
+      method: 'POST',
+      headers: this.getAuthHeaders(),
+      body: JSON.stringify(transactions)
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to create batch');
+    }
+
+    return await response.json();
+  }
+
+  async getPendingApprovals() {
+    const response = await fetch(`${API_BASE_URL}/payroll2/pending-approvals`, {
+      method: 'GET',
+      headers: this.getAuthHeaders()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText);
+    }
+
+    return await response.json();
+  }
+
+  async getPayrollHistory() {
+    const response = await fetch(`${API_BASE_URL}/payroll2/history`, {
+      method: 'GET',
+      headers: this.getAuthHeaders()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText);
+    }
+
+    return await response.json();
+  }
+
+  async getBatchDetails(batchReference) {
+    const response = await fetch(`${API_BASE_URL}/payroll2/batch/${batchReference}`, {
+      method: 'GET',
+      headers: this.getAuthHeaders()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText);
+    }
+
+    return await response.json();
+  }
+
+  async getBatchTransactions(batchReference) {
+    const response = await fetch(`${API_BASE_URL}/payroll2/batch/${batchReference}/transactions`, {
+      method: 'GET',
+      headers: this.getAuthHeaders()
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(errorText);
+    }
+
+    return await response.json();
+  }
+
+  async approveBatch(batchReference) {
+    const response = await fetch(`${API_BASE_URL}/payroll2/batch/${batchReference}/approve`, {
+      method: 'POST',
+      headers: this.getAuthHeaders()
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to approve batch');
+    }
+
+    return await response.json();
+  }
+
+  // Helper method to get current user ID from JWT token
+  getCurrentUserId() {
+    const token = localStorage.getItem('token');
+    if (!token) return null;
+    
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.userId;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Make sure you have proper auth headers
+  getAuthHeaders() {
+    const token = localStorage.getItem('token');
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    };
+  }
+}
+
+export default new ApiService();
