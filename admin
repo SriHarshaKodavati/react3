@@ -1,0 +1,87 @@
+// Update these specific functions in your Admin.js component:
+
+const addSingleTransaction = () => {
+  if (Object.values(singleForm).every(field => field.toString().trim() !== '')) {
+    const newTransaction = {
+      id: Date.now(),
+      userId: parseInt(singleForm.userId), // Convert to integer
+      employeeName: singleForm.employeeName,
+      amount: parseFloat(singleForm.amount), // Convert to number
+      remarks: singleForm.remarks
+    };
+    setTransactions(prev => [...prev, newTransaction]);
+    setSingleForm({ userId: '', employeeName: '', amount: '', remarks: '' });
+  } else {
+    setError('All fields are required!');
+  }
+};
+
+// Update the CSV parsing function
+const handleFileUpload = (event) => {
+  const file = event.target.files[0];
+  if (file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target.result;
+        const lines = text.split('\n');
+        
+        const parsedTransactions = lines.slice(1)
+          .filter(line => line.trim())
+          .map((line, index) => {
+            const values = line.split(',').map(v => v.trim());
+            return {
+              id: Date.now() + index,
+              userId: values[0] ? parseInt(values[0]) : '', // Convert to integer
+              employeeName: values[1] || '',
+              amount: values[2] ? parseFloat(values[2]) : '', // Convert to number
+              remarks: values[3] || '',
+              isValid: values.length >= 4 && values.every(v => v && v.trim())
+            };
+          });
+
+        setBulkTransactions(parsedTransactions);
+        setShowBulkUpload(true);
+      } catch (error) {
+        setError('Error parsing CSV file');
+      }
+    };
+    reader.readAsText(file);
+  }
+};
+
+// Update the edit save function
+const saveEdit = () => {
+  if (Object.values(editingRow).every(field => 
+    typeof field === 'number' || (typeof field === 'string' && field.trim() !== '')
+  )) {
+    // Ensure proper data types when saving edits
+    const updatedRow = {
+      ...editingRow,
+      userId: parseInt(editingRow.userId),
+      amount: parseFloat(editingRow.amount)
+    };
+    
+    setTransactions(prev => 
+      prev.map(t => t.id === editingRow.id ? updatedRow : t)
+    );
+    setEditingRow(null);
+  } else {
+    setError('All fields are required!');
+  }
+};
+
+// Update the bulk upload modal save function
+const saveBulkTransactions = () => {
+  const validTransactions = bulkTransactions
+    .filter(t => t.isValid)
+    .map(t => ({
+      ...t,
+      userId: parseInt(t.userId), // Ensure integer
+      amount: parseFloat(t.amount) // Ensure number
+    }));
+  
+  setTransactions(prev => [...prev, ...validTransactions]);
+  setShowBulkUpload(false);
+  setBulkTransactions([]);
+};
