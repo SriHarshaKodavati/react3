@@ -1,0 +1,1345 @@
+# Complete Payroll Approval System
+
+## Backend Implementation
+
+### 1. Updated PayrollService2.java (Fixed Logic)
+
+```java
+package com.simplebanking.service;
+
+import com.simplebanking.model.*;
+import com.simplebanking.repository.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+public class PayrollService2 {
+    
+    @Autowired
+    private PayrollBatchRepository2 payrollBatchRepository;
+    
+    @Autowired
+    private BatchTransactionRepository2 batchTransactionRepository;
+    
+    @Autowired
+    private TransactionRepository2 transactionRepository;
+    
+    @Autowired
+    private AccountRepository2 accountRepository;
+    
+    @Autowired
+    private UserService2 userService;
+    
+    // Create new payroll batch
+    public String createPayrollBatch(List<BatchTransaction2> transactions, Integer createdBy) {
+        String batchReference = "BATCH_" + System.currentTimeMillis();
+        
+        BigDecimal totalAmount = transactions.stream()
+            .map(BatchTransaction2::getAmount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        
+        Integer requiredApprovals = getRequiredApprovals(totalAmount);
+        
+        PayrollBatch2 batch = new PayrollBatch2();
+        batch.setBatchReference(batchReference);
+        batch.setTotalAmount(totalAmount);
+        batch.setTotalTransactions(transactions.size());
+        batch.setCreatedBy(createdBy);
+        batch.setRequiredApprovals(requiredApprovals);
+        batch.setStatus("PENDING");
+        batch.setCreatedAt(LocalDateTime.now());
+        batch.setSubmittedAt(LocalDateTime.now());
+        
+        payrollBatchRepository.save(batch);
+        
+        for (BatchTransaction2 transaction : transactions) {
+            transaction.setBatchId(batchReference);
+            transaction.setCreatedBy(createdBy);
+            transaction.setCreatedAt(LocalDateTime.now());
+            transaction.setStatus("PENDING");
+            batchTransactionRepository.save(transaction);
+        }
+        
+        return batchReference;
+    }
+    
+    private Integer getRequiredApprovals(BigDecimal amount) {
+        if (amount.compareTo(new BigDecimal("500000")) >= 0) {
+            return 3;
+        } else if (amount.compareTo(new BigDecimal("100000")) >= 0) {
+            return 2;
+        } else {
+            return 1;
+        }
+    }
+    
+    // Get pending batches for approval (EXCLUDING batches created by the same user)
+    public List<PayrollBatch2> getPendingBatchesForApproval(Integer userId) {
+        List<PayrollBatch2> allPending = payrollBatchRepository.findByStatus("PENDING");
+        // Filter out batches created by this user - they cannot approve their own batches
+        return allPending.stream()
+            .filter(batch -> !batch.getCreatedBy().equals(userId))
+            .toList();
+    }
+    
+    // Get approved payroll history ONLY for batches created by this user
+    public List<PayrollBatch2> getApprovedPayrollHistory(Integer createdBy) {
+        return payrollBatchRepository.findByCreatedByAndStatus(createdBy, "APPROVED");
+    }
+    
+    // Get transactions for a batch
+    public List<BatchTransaction2> getBatchTransactions(String batchReference) {
+        return batchTransactionRepository.findByBatchId(batchReference);
+    }
+    
+    // Get batch details
+    public PayrollBatch2 getBatchDetails(String batchReference) {
+        return payrollBatchRepository.findByBatchReference(batchReference)
+            .orElseThrow(() -> new RuntimeException("Batch not found: " + batchReference));
+    }
+    
+    // Approve batch by manager (cannot approve own batch)
+    public boolean approveBatch(String batchReference, Integer approvedBy) {
+        PayrollBatch2 batch = getBatchDetails(batchReference);
+        
+        if (!"PENDING".equals(batch.getStatus())) {
+            throw new RuntimeException("Batch is not pending approval");
+        }
+        
+        // Check if user is trying to approve their own batch
+        if (batch.getCreatedBy().equals(approvedBy)) {
+            throw new RuntimeException("You cannot approve your own payroll batch");
+        }
+        
+        // Decrease required approvals
+        Integer currentRequired = batch.getRequiredApprovals();
+        batch.setRequiredApprovals(currentRequired - 1);
+        
+        // If no more approvals needed, approve the batch
+        if (batch.getRequiredApprovals() <= 0) {
+            batch.setStatus("APPROVED");
+            batch.setProcessedAt(LocalDateTime.now());
+            
+            // Process individual transactions
+            processApprovedBatch(batch, approvedBy);
+        }
+        
+        payrollBatchRepository.save(batch);
+        return batch.getRequiredApprovals() <= 0;
+    }
+    
+    // Process approved batch - create individual transactions
+    private void processApprovedBatch(PayrollBatch2 batch, Integer approvedBy) {
+        List<BatchTransaction2> batchTransactions = getBatchTransactions(batch.getBatchReference());
+        
+        for (BatchTransaction2 batchTxn : batchTransactions) {
+            batchTxn.setStatus("APPROVED");
+            batchTxn.setApprovedAt(LocalDateTime.now());
+            batchTxn.setApprovedBy(approvedBy);
+            batchTransactionRepository.save(batchTxn);
+            
+            addMoneyToEmployee(batchTxn);
+        }
+    }
+    
+    private void addMoneyToEmployee(BatchTransaction2 batchTxn) {
+        List<Account2> accounts = accountRepository.findByUserId(batchTxn.getUserId());
+        
+        if (accounts.isEmpty()) {
+            throw new RuntimeException("No account found for employee: " + batchTxn.getEmployeeName());
+        }
+        
+        Account2 account = accounts.get(0);
+        
+        BigDecimal oldBalance = account.getCurrentBalance();
+        BigDecimal newBalance = oldBalance.add(batchTxn.getAmount());
+        account.setCurrentBalance(newBalance);
+        accountRepository.save(account);
+        
+        Transaction2 transaction = new Transaction2();
+        Integer nextId = getNextTransactionId();
+        transaction.setTransactionId(nextId);
+        transaction.setAccountId(account.getAccountId());
+        transaction.setTransactionDate(LocalDate.now());
+        transaction.setDescription("Payroll - " + batchTxn.getRemarks());
+        transaction.setTransactionType("Credit");
+        transaction.setAmount(batchTxn.getAmount());
+        transaction.setBalanceAfter(newBalance);
+        transaction.setReferenceNumber("PAY_" + batchTxn.getBatchId() + "_" + batchTxn.getTransactionId());
+        
+        transactionRepository.save(transaction);
+    }
+    
+    private Integer getNextTransactionId() {
+        List<Transaction2> allTransactions = transactionRepository.findAll();
+        if (allTransactions.isEmpty()) {
+            return 1000;
+        }
+        
+        Integer maxId = allTransactions.stream()
+            .mapToInt(Transaction2::getTransactionId)
+            .max()
+            .orElse(1000);
+        
+        return maxId + 1;
+    }
+    
+    public List<User2> getAllManagers() {
+        return userService.getUsersByUserType("MANAGER");
+    }
+}
+```
+
+### 2. Updated PayrollController2.java (Fixed Endpoints)
+
+```java
+package com.simplebanking.controller;
+
+import com.simplebanking.model.*;
+import com.simplebanking.service.PayrollService2;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import jakarta.servlet.http.HttpServletRequest;
+import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/payroll2")
+@CrossOrigin(origins = "http://localhost:3000")
+public class PayrollController2 {
+    
+    @Autowired
+    private PayrollService2 payrollService;
+    
+    // Create new payroll batch (only for managers)
+    @PostMapping("/create-batch")
+    public ResponseEntity<Map<String, String>> createBatch(@RequestBody List<Map<String, Object>> transactionData,
+                                                           HttpServletRequest request) {
+        String userType = (String) request.getAttribute("userType");
+        Integer createdBy = (Integer) request.getAttribute("userId");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        try {
+            List<BatchTransaction2> transactions = transactionData.stream()
+                .map(data -> {
+                    BatchTransaction2 txn = new BatchTransaction2();
+                    txn.setUserId((Integer) data.get("userId"));
+                    txn.setEmployeeName((String) data.get("employeeName"));
+                    txn.setAmount(new BigDecimal(data.get("amount").toString()));
+                    txn.setRemarks((String) data.get("remarks"));
+                    return txn;
+                })
+                .toList();
+            
+            String batchReference = payrollService.createPayrollBatch(transactions, createdBy);
+            
+            Map<String, String> response = new HashMap<>();
+            response.put("message", "Payroll batch sent for approval to all managers");
+            response.put("batchReference", batchReference);
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(400).body(error);
+        }
+    }
+    
+    // Get pending batches for approval (EXCLUDES user's own batches)
+    @GetMapping("/pending-approvals")
+    public ResponseEntity<List<PayrollBatch2>> getPendingApprovals(HttpServletRequest request) {
+        String userType = (String) request.getAttribute("userType");
+        Integer userId = (Integer) request.getAttribute("userId");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        // Only show batches NOT created by this user
+        List<PayrollBatch2> pendingBatches = payrollService.getPendingBatchesForApproval(userId);
+        return ResponseEntity.ok(pendingBatches);
+    }
+    
+    // Get payroll history (ONLY batches created by this user)
+    @GetMapping("/history")
+    public ResponseEntity<List<PayrollBatch2>> getPayrollHistory(HttpServletRequest request) {
+        String userType = (String) request.getAttribute("userType");
+        Integer userId = (Integer) request.getAttribute("userId");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        // Only show batches created by this user
+        List<PayrollBatch2> history = payrollService.getApprovedPayrollHistory(userId);
+        return ResponseEntity.ok(history);
+    }
+    
+    // Get transactions for a specific batch
+    @GetMapping("/batch/{batchReference}/transactions")
+    public ResponseEntity<List<BatchTransaction2>> getBatchTransactions(
+            @PathVariable String batchReference,
+            HttpServletRequest request) {
+        
+        String userType = (String) request.getAttribute("userType");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        List<BatchTransaction2> transactions = payrollService.getBatchTransactions(batchReference);
+        return ResponseEntity.ok(transactions);
+    }
+    
+    // Get complete batch details
+    @GetMapping("/batch/{batchReference}")
+    public ResponseEntity<Map<String, Object>> getBatchDetails(
+            @PathVariable String batchReference,
+            HttpServletRequest request) {
+        
+        String userType = (String) request.getAttribute("userType");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        try {
+            PayrollBatch2 batch = payrollService.getBatchDetails(batchReference);
+            List<BatchTransaction2> transactions = payrollService.getBatchTransactions(batchReference);
+            
+            Map<String, Object> result = new HashMap<>();
+            result.put("batch", batch);
+            result.put("transactions", transactions);
+            
+            return ResponseEntity.ok(result);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+    
+    // Approve batch (cannot approve own batch)
+    @PostMapping("/batch/{batchReference}/approve")
+    public ResponseEntity<Map<String, Object>> approveBatch(
+            @PathVariable String batchReference,
+            HttpServletRequest request) {
+        
+        String userType = (String) request.getAttribute("userType");
+        Integer approvedBy = (Integer) request.getAttribute("userId");
+        
+        if (!"MANAGER".equals(userType)) {
+            return ResponseEntity.status(403).build();
+        }
+        
+        try {
+            boolean fullyApproved = payrollService.approveBatch(batchReference, approvedBy);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("message", fullyApproved ? 
+                "Batch fully approved and processed! Individual transactions created." : 
+                "Your approval recorded. More approvals needed.");
+            response.put("fullyApproved", fullyApproved);
+            response.put("batchReference", batchReference);
+            
+            return ResponseEntity.ok(response);
+        } catch (RuntimeException e) {
+            Map<String, String> error = new HashMap<>();
+            error.put("error", e.getMessage());
+            return ResponseEntity.status(400).body(error);
+        }
+    }
+}
+```
+
+## Frontend Implementation
+
+### 1. Updated API Methods (add to api.js)
+
+```javascript
+// Add these methods to your existing api.js
+
+async createPayrollBatch(transactions) {
+  const response = await fetch(`${API_BASE_URL}/payroll2/create-batch`, {
+    method: 'POST',
+    headers: this.getAuthHeaders(),
+    body: JSON.stringify(transactions)
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to create batch');
+  }
+
+  return await response.json();
+}
+
+async getPendingApprovals() {
+  const response = await fetch(`${API_BASE_URL}/payroll2/pending-approvals`, {
+    method: 'GET',
+    headers: this.getAuthHeaders()
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText);
+  }
+
+  return await response.json();
+}
+
+async approveBatch(batchReference) {
+  const response = await fetch(`${API_BASE_URL}/payroll2/batch/${batchReference}/approve`, {
+    method: 'POST',
+    headers: this.getAuthHeaders()
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to approve batch');
+  }
+
+  return await response.json();
+}
+
+async getAllManagers() {
+  const response = await fetch(`${API_BASE_URL}/payroll2/managers`, {
+    method: 'GET',
+    headers: this.getAuthHeaders()
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText);
+  }
+
+  return await response.json();
+}
+```
+
+### 2. Updated Admin.js (Simplified for Database Integration)
+
+```javascript
+// src/components/Admin.js
+import React, { useState, useRef, useEffect } from 'react';
+import { 
+  Plus, 
+  Upload, 
+  Edit2, 
+  Trash2, 
+  Send, 
+  X, 
+  Check, 
+  Clock,
+  CheckCircle,
+  FileText,
+  History,
+  ChevronDown,
+  ChevronRight,
+  Calendar,
+  DollarSign,
+  Users
+} from 'lucide-react';
+import ApiService from '../services/api';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+const Admin = () => {
+  const [transactions, setTransactions] = useState([]);
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
+  const [bulkTransactions, setBulkTransactions] = useState([]);
+  const [editingRow, setEditingRow] = useState(null);
+  const [pendingBatches, setPendingBatches] = useState([]);
+  const [payrollHistory, setPayrollHistory] = useState([]);
+  const [activeTab, setActiveTab] = useState('create');
+  const [expandedBatch, setExpandedBatch] = useState(null);
+  const [expandedHistoryBatch, setExpandedHistoryBatch] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  
+  const fileInputRef = useRef();
+
+  const [singleForm, setSingleForm] = useState({
+    userId: '',
+    employeeName: '',
+    amount: '',
+    remarks: ''
+  });
+
+  const sidebarItems = [
+    { id: 'create', label: 'Create Payroll', icon: FileText },
+    { id: 'requests', label: 'Pending Approvals', icon: Clock },
+    { id: 'history', label: 'Payroll History', icon: History }
+  ];
+
+  useEffect(() => {
+    if (activeTab === 'requests') {
+      loadPendingApprovals();
+    } else if (activeTab === 'history') {
+      loadPayrollHistory();
+    }
+  }, [activeTab]);
+
+  const loadPendingApprovals = async () => {
+    try {
+      const batches = await ApiService.getPendingApprovals();
+      setPendingBatches(batches);
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  const loadPayrollHistory = async () => {
+    try {
+      const history = await ApiService.getPayrollHistory();
+      setPayrollHistory(history);
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  const handleSingleFormChange = (field, value) => {
+    setSingleForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const addSingleTransaction = () => {
+    if (Object.values(singleForm).every(field => field.toString().trim() !== '')) {
+      const newTransaction = {
+        id: Date.now(),
+        ...singleForm,
+        amount: parseFloat(singleForm.amount)
+      };
+      setTransactions(prev => [...prev, newTransaction]);
+      setSingleForm({ userId: '', employeeName: '', amount: '', remarks: '' });
+    } else {
+      setError('All fields are required!');
+    }
+  };
+
+  const handleFileUpload = (event) => {
+    const file = event.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target.result;
+          const lines = text.split('\n');
+          
+          const parsedTransactions = lines.slice(1)
+            .filter(line => line.trim())
+            .map((line, index) => {
+              const values = line.split(',').map(v => v.trim());
+              return {
+                id: Date.now() + index,
+                userId: values[0] || '',
+                employeeName: values[1] || '',
+                amount: values[2] ? parseFloat(values[2]) : '',
+                remarks: values[3] || '',
+                isValid: values.length >= 4 && values.every(v => v && v.trim())
+              };
+            });
+
+          setBulkTransactions(parsedTransactions);
+          setShowBulkUpload(true);
+        } catch (error) {
+          setError('Error parsing CSV file');
+        }
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const sendForApproval = async () => {
+    if (transactions.length === 0) {
+      setError('No transactions to send for approval');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const response = await ApiService.createPayrollBatch(transactions);
+      setMessage(`Batch ${response.batchReference} sent for approval!`);
+      setTransactions([]);
+      setError('');
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const approveBatch = async (batchReference) => {
+    try {
+      const response = await ApiService.approveBatch(batchReference);
+      setMessage(response.message);
+      loadPendingApprovals(); // Refresh pending approvals
+      if (response.fullyApproved) {
+        loadPayrollHistory(); // Refresh history if fully approved
+      }
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return `₹${amount.toLocaleString('en-IN')}`;
+  };
+
+  const formatDateTime = (dateTime) => {
+    return new Date(dateTime).toLocaleString('en-IN');
+  };
+
+  const getTotalAmount = () => {
+    return transactions.reduce((sum, t) => sum + t.amount, 0);
+  };
+
+  const deleteTransaction = (id) => {
+    setTransactions(prev => prev.filter(t => t.id !== id));
+  };
+
+  const startEditing = (transaction) => {
+    setEditingRow({ ...transaction });
+  };
+
+  const saveEdit = () => {
+    if (Object.values(editingRow).every(field => 
+      typeof field === 'number' || (typeof field === 'string' && field.trim() !== '')
+    )) {
+      setTransactions(prev => 
+        prev.map(t => t.id === editingRow.id ? editingRow : t)
+      );
+      setEditingRow(null);
+    } else {
+      setError('All fields are required!');
+    }
+  };
+
+  const renderCreateTab = () => (
+    <div className="container-fluid">
+      {/* Alert Messages */}
+      {message && (
+        <div className="alert alert-success alert-dismissible">
+          {message}
+          <button onClick={() => setMessage('')} className="btn-close"></button>
+        </div>
+      )}
+      {error && (
+        <div className="alert alert-danger alert-dismissible">
+          {error}
+          <button onClick={() => setError('')} className="btn-close"></button>
+        </div>
+      )}
+
+      {/* Single Transaction Form */}
+      <div className="card mb-4">
+        <div className="card-header">
+          <h5>Add Single Transaction</h5>
+        </div>
+        <div className="card-body">
+          <div className="row g-3">
+            <div className="col-md-3">
+              <input
+                type="number"
+                placeholder="User ID"
+                value={singleForm.userId}
+                onChange={(e) => handleSingleFormChange('userId', e.target.value)}
+                className="form-control"
+              />
+            </div>
+            <div className="col-md-3">
+              <input
+                type="text"
+                placeholder="Employee Name"
+                value={singleForm.employeeName}
+                onChange={(e) => handleSingleFormChange('employeeName', e.target.value)}
+                className="form-control"
+              />
+            </div>
+            <div className="col-md-2">
+              <input
+                type="number"
+                placeholder="Amount"
+                value={singleForm.amount}
+                onChange={(e) => handleSingleFormChange('amount', e.target.value)}
+                className="form-control"
+              />
+            </div>
+            <div className="col-md-3">
+              <input
+                type="text"
+                placeholder="Remarks"
+                value={singleForm.remarks}
+                onChange={(e) => handleSingleFormChange('remarks', e.target.value)}
+                className="form-control"
+              />
+            </div>
+            <div className="col-md-1">
+              <button onClick={addSingleTransaction} className="btn btn-primary">
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bulk Upload */}
+      <div className="card mb-4">
+        <div className="card-header">
+          <h5>Bulk Upload</h5>
+        </div>
+        <div className="card-body text-center">
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleFileUpload}
+            ref={fileInputRef}
+            style={{ display: 'none' }}
+          />
+          <button onClick={() => fileInputRef.current?.click()} className="btn btn-secondary">
+            Upload CSV
+          </button>
+          <p className="text-muted mt-2">Format: User ID, Employee Name, Amount, Remarks</p>
+        </div>
+      </div>
+
+      {/* Transactions Table */}
+      <div className="card">
+        <div className="card-header">
+          <div className="d-flex justify-content-between align-items-center">
+            <h5>Current Batch ({transactions.length} transactions)</h5>
+            {transactions.length > 0 && (
+              <div className="d-flex gap-3">
+                <span className="badge bg-success fs-6">
+                  {formatCurrency(getTotalAmount())}
+                </span>
+                <button 
+                  onClick={sendForApproval}
+                  className="btn btn-success"
+                  disabled={loading}
+                >
+                  {loading ? 'Sending...' : 'Send for Approval'}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="card-body p-0">
+          {transactions.length > 0 ? (
+            <div className="table-responsive">
+              <table className="table table-hover mb-0">
+                <thead className="table-primary">
+                  <tr>
+                    <th>User ID</th>
+                    <th>Employee Name</th>
+                    <th>Amount</th>
+                    <th>Remarks</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.map(transaction => (
+                    <tr key={transaction.id}>
+                      <td>
+                        {editingRow?.id === transaction.id ? (
+                          <input
+                            type="number"
+                            value={editingRow.userId}
+                            onChange={(e) => setEditingRow(prev => ({...prev, userId: e.target.value}))}
+                            className="form-control form-control-sm"
+                          />
+                        ) : (
+                          transaction.userId
+                        )}
+                      </td>
+                      <td>
+                        {editingRow?.id === transaction.id ? (
+                          <input
+                            type="text"
+                            value={editingRow.employeeName}
+                            onChange={(e) => setEditingRow(prev => ({...prev, employeeName: e.target.value}))}
+                            className="form-control form-control-sm"
+                          />
+                        ) : (
+                          transaction.employeeName
+                        )}
+                      </td>
+                      <td>
+                        {editingRow?.id === transaction.id ? (
+                          <input
+                            type="number"
+                            value={editingRow.amount}
+                            onChange={(e) => setEditingRow(prev => ({...prev, amount: parseFloat(e.target.value) || 0}))}
+                            className="form-control form-control-sm"
+                          />
+                        ) : (
+                          formatCurrency(transaction.amount)
+                        )}
+                      </td>
+                      <td>
+                        {editingRow?.id === transaction.id ? (
+                          <input
+                            type="text"
+                            value={editingRow.remarks}
+                            onChange={(e) => setEditingRow(prev => ({...prev, remarks: e.target.value}))}
+                            className="form-control form-control-sm"
+                          />
+                        ) : (
+                          transaction.remarks
+                        )}
+                      </td>
+                      <td>
+                        {editingRow?.id === transaction.id ? (
+                          <div className="btn-group btn-group-sm">
+                            <button onClick={saveEdit} className="btn btn-success">
+                              <Check size={14} />
+                            </button>
+                            <button onClick={() => setEditingRow(null)} className="btn btn-secondary">
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="btn-group btn-group-sm">
+                            <button onClick={() => startEditing(transaction)} className="btn btn-primary">
+                              <Edit2 size={14} />
+                            </button>
+                            <button onClick={() => deleteTransaction(transaction.id)} className="btn btn-danger">
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-5 text-muted">
+              <FileText size={48} className="mb-3 opacity-50" />
+              <p>No transactions added yet</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderRequestsTab = () => (
+    <div className="container-fluid">
+      <div className="card">
+        <div className="card-header">
+          <h5>Pending Approvals</h5>
+        </div>
+        <div className="card-body">
+          {pendingBatches.length > 0 ? (
+            <div className="row g-3">
+              {pendingBatches.map(batch => (
+                <div key={batch.batchReference} className="col-12">
+                  <div className="card border">
+                    <div 
+                      className="card-header cursor-pointer"
+                      onClick={() => setExpandedBatch(expandedBatch === batch.batchReference ? null : batch.batchReference)}
+                    >
+                      <div className="d-flex justify-content-between align-items-center">
+                        <div>
+                          <h6>{batch.batchReference}</h6>
+                          <div className="d-flex gap-3 small text-muted">
+                            <span>{formatDateTime(batch.createdAt)}</span>
+                            <span>{formatCurrency(batch.totalAmount)}</span>
+                            <span>{batch.totalTransactions} transactions</span>
+                            <span>Approvals needed: {batch.requiredApprovals}</span>
+                          </div>
+                        </div>
+                        <div className="d-flex align-items-center gap-2">
+                          <span className="badge bg-warning">Pending</span>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              approveBatch(batch.batchReference);
+                            }}
+                            className="btn btn-success btn-sm"
+                          >
+                            Approve
+                          </button>
+                          {expandedBatch === batch.batchReference ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {expandedBatch === batch.batchReference && (
+                      <div className="card-body">
+                        <h6>Transactions in this batch:</h6>
+                        <div className="table-responsive">
+                          <table className="table table-sm">
+                            <thead>
+                              <tr>
+                                <th>Employee Name</th>
+                                <th>User ID</th>
+                                <th>Amount</th>
+                                <th>Remarks</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {/* You'll need to fetch batch transactions here */}
+                              <tr>
+                                <td colSpan="4" className="text-center text-muted">
+                                  Click to load transactions...
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-5 text-muted">
+              <Clock size={48} className="mb-3 opacity-50" />
+              <p>No pending approval requests</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderHistoryTab = () => (
+    <div className="container-fluid">
+      <div className="card">
+        <div className="card-header">
+          <h5>Payroll History</h5>
+        </div>
+        <div className="card-body">
+          {payrollHistory.length > 0 ? (
+            <div className="row g-3">
+              {payrollHistory.map(batch => (
+                <div key={batch.batchReference} className="col-12">
+                  <div className="card border">
+                    <div 
+                      className="card-header cursor-pointer"
+                      onClick={() => setExpandedHistoryBatch(expandedHistoryBatch === batch.batchReference ? null : batch.batchReference)}
+                    >
+                      <div className="d-flex justify-content-between align-items-center">
+                        <div>
+                          <h6>{batch.batchReference}</h6>
+                          <div className="d-flex gap-3 small text-muted">
+                            <span>{formatDateTime(batch.processedAt)}</span>
+                            <span>{formatCurrency(batch.totalAmount)}</span>
+                            <span>{batch.totalTransactions} transactions</span>
+                          </div>
+                        </div>
+                        <div className="d-flex align-items-center gap-2">
+                          <span className="badge bg-success">Approved</span>
+                          {expandedHistoryBatch === batch.batchReference ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {expandedHistoryBatch === batch.batchReference && (
+                      <div className="card-body">
+                        <h6>Transaction Details:</h6>
+                        <div className="table-responsive">
+                          <table className="table table-sm">
+                            <thead>
+                              <tr>
+                                <th>Employee Name</th>
+                                <th>User ID</th>
+                                <th>Amount</th>
+                                <th>Remarks</th>
+                                <th>Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {/* You'll need to fetch batch transactions here */}
+                              <tr>
+                                <td colSpan="5" className="text-center text-muted">
+                                  Click to load transaction details...
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-5 text-muted">
+              <History size={48} className="mb-3 opacity-50" />
+              <p>No payroll history available</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="d-flex">
+      {/* Sidebar */}
+      <div className="bg-white border-end shadow-sm" style={{width: '250px', minHeight: '100vh'}}>
+        <div className="p-3">
+          <h5>Payroll Admin</h5>
+        </div>
+        <nav className="p-3">
+          {sidebarItems.map(item => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              className={`btn w-100 mb-2 d-flex align-items-center justify-content-start ${
+                activeTab === item.id ? 'btn-primary' : 'btn-outline-primary'
+              }`}
+            >
+              <item.icon size={18} className="me-2" />
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-grow-1 p-3 bg-light">
+        {activeTab === 'create' && renderCreateTab()}
+        {activeTab === 'requests' && renderRequestsTab()}
+        {activeTab === 'history' && renderHistoryTab()}
+      </div>
+
+      {/* Bulk Upload Modal */}
+      {showBulkUpload && (
+        <div className="modal show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+          <div className="modal-dialog modal-xl">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5>Review Bulk Upload</h5>
+                <button onClick={() => setShowBulkUpload(false)} className="btn-close"></button>
+              </div>
+              <div className="modal-body">
+                <div className="table-responsive">
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th>Status</th>
+                        <th>User ID</th>
+                        <th>Employee Name</th>
+                        <th>Amount</th>
+                        <th>Remarks</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bulkTransactions.map(transaction => (
+                        <tr key={transaction.id} className={!transaction.isValid ? 'table-danger' : ''}>
+                          <td>
+                            {transaction.isValid ? (
+                              <Check size={16} className="text-success" />
+                            ) : (
+                              <X size={16} className="text-danger" />
+                            )}
+                          </td>
+                          <td>{transaction.userId || '-'}</td>
+                          <td>{transaction.employeeName || '-'}</td>
+                          <td>{transaction.amount ? formatCurrency(transaction.amount) : '-'}</td>
+                          <td>{transaction.remarks || '-'}</td>
+                          <td>
+                            <button
+                              onClick={() => setBulkTransactions(prev => prev.filter(t => t.id !== transaction.id))}
+                              className="btn btn-danger btn-sm"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button onClick={() => setShowBulkUpload(false)} className="btn btn-secondary">
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    const validTransactions = bulkTransactions.filter(t => t.isValid);
+                    setTransactions(prev => [...prev, ...validTransactions]);
+                    setShowBulkUpload(false);
+                    setBulkTransactions([]);
+                  }} 
+                  className="btn btn-success"
+                >
+                  Add Valid ({bulkTransactions.filter(t => t.isValid).length})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Admin;
+```
+
+### 3. Approver Component (New Page for Manager Approvals)
+
+```javascript
+// src/components/Approver.js
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import ApiService from '../services/api';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+const Approver = () => {
+  const [pendingBatches, setPendingBatches] = useState([]);
+  const [selectedBatch, setSelectedBatch] = useState(null);
+  const [batchTransactions, setBatchTransactions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    loadPendingBatches();
+  }, []);
+
+  const loadPendingBatches = async () => {
+    try {
+      setLoading(true);
+      const batches = await ApiService.getPendingApprovals();
+      setPendingBatches(batches);
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadBatchTransactions = async (batchReference) => {
+    try {
+      const transactions = await ApiService.getBatchTransactions(batchReference);
+      setBatchTransactions(transactions);
+      setSelectedBatch(batchReference);
+    } catch (error) {
+      setError('Failed to load batch transactions');
+    }
+  };
+
+  const approveBatch = async (batchReference) => {
+    try {
+      const response = await ApiService.approveBatch(batchReference);
+      setMessage(response.message);
+      setError('');
+      
+      // Refresh the pending batches list
+      loadPendingBatches();
+      
+      // Close details if this batch was selected
+      if (selectedBatch === batchReference) {
+        setSelectedBatch(null);
+        setBatchTransactions([]);
+      }
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return `₹${parseFloat(amount).toLocaleString('en-IN')}`;
+  };
+
+  const formatDateTime = (dateTime) => {
+    return new Date(dateTime).toLocaleString('en-IN');
+  };
+
+  if (loading) {
+    return (
+      <div className="container mt-5 text-center">
+        <div className="spinner-border" role="status"></div>
+        <p className="mt-2">Loading pending approvals...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mt-4">
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <h2>Payroll Approvals</h2>
+        <button className="btn btn-secondary" onClick={() => navigate(-1)}>
+          Back
+        </button>
+      </div>
+
+      {/* Alert Messages */}
+      {message && (
+        <div className="alert alert-success alert-dismissible">
+          {message}
+          <button onClick={() => setMessage('')} className="btn-close"></button>
+        </div>
+      )}
+      {error && (
+        <div className="alert alert-danger alert-dismissible">
+          {error}
+          <button onClick={() => setError('')} className="btn-close"></button>
+        </div>
+      )}
+
+      <div className="row">
+        {/* Pending Batches List */}
+        <div className="col-md-6">
+          <div className="card">
+            <div className="card-header">
+              <h5>Pending Approvals ({pendingBatches.length})</h5>
+            </div>
+            <div className="card-body">
+              {pendingBatches.length > 0 ? (
+                <div className="list-group">
+                  {pendingBatches.map(batch => (
+                    <div 
+                      key={batch.batchReference} 
+                      className={`list-group-item list-group-item-action ${selectedBatch === batch.batchReference ? 'active' : ''}`}
+                      onClick={() => loadBatchTransactions(batch.batchReference)}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <div className="d-flex justify-content-between align-items-center">
+                        <div>
+                          <h6 className="mb-1">{batch.batchReference}</h6>
+                          <p className="mb-1">
+                            <strong>Amount:</strong> {formatCurrency(batch.totalAmount)}
+                          </p>
+                          <small>
+                            <strong>Transactions:</strong> {batch.totalTransactions} | 
+                            <strong> Approvals needed:</strong> {batch.requiredApprovals} |
+                            <strong> Created:</strong> {formatDateTime(batch.createdAt)}
+                          </small>
+                        </div>
+                        <div>
+                          <span className="badge bg-warning">Pending</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-5 text-muted">
+                  <p>No pending approvals</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Batch Details */}
+        <div className="col-md-6">
+          <div className="card">
+            <div className="card-header">
+              <div className="d-flex justify-content-between align-items-center">
+                <h5>Batch Details</h5>
+                {selectedBatch && (
+                  <button 
+                    onClick={() => approveBatch(selectedBatch)}
+                    className="btn btn-success"
+                  >
+                    Approve Batch
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="card-body">
+              {selectedBatch ? (
+                <div>
+                  <h6>Batch: {selectedBatch}</h6>
+                  
+                  {batchTransactions.length > 0 ? (
+                    <div className="table-responsive">
+                      <table className="table table-sm">
+                        <thead>
+                          <tr>
+                            <th>Employee</th>
+                            <th>User ID</th>
+                            <th>Amount</th>
+                            <th>Remarks</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batchTransactions.map(txn => (
+                            <tr key={txn.transactionId}>
+                              <td>{txn.employeeName}</td>
+                              <td>{txn.userId}</td>
+                              <td>{formatCurrency(txn.amount)}</td>
+                              <td>{txn.remarks}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      
+                      <div className="mt-3 p-3 bg-light rounded">
+                        <strong>Total Amount: {formatCurrency(
+                          batchTransactions.reduce((sum, txn) => sum + parseFloat(txn.amount), 0)
+                        )}</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-center py-3">
+                      <div className="spinner-border spinner-border-sm" role="status"></div>
+                      <p className="mt-2">Loading transactions...</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center py-5 text-muted">
+                  <p>Select a batch to view details</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Approver;
+```
+
+## How to Test the System
+
+1. **Database Setup**: The tables should already exist from our previous discussion
+
+2. **Backend Testing**:
+   - Start Spring Boot application
+   - Login as manager to get JWT token
+   - Test creating payroll batch: `POST /api/payroll2/create-batch`
+   - Test getting pending approvals: `GET /api/payroll2/pending-approvals`
+   - Test approving batch: `POST /api/payroll2/batch/{batchReference}/approve`
+
+3. **Frontend Testing**:
+   - Login as manager
+   - Navigate to admin page
+   - Create payroll with transactions
+   - Send for approval
+   - Navigate to approver page (or login as different manager)
+   - View pending approvals and approve batches
+
+4. **Workflow**:
+   - Admin creates payroll → Batch goes to database with PENDING status
+   - System determines required approvals based on total amount
+   - Any manager can approve → Required approvals decreases by 1
+   - When required approvals reaches 0 → Batch becomes APPROVED
+   - Individual transactions are created in employees' accounts
+   - Batch moves to history
+
+The system now automatically sends batches to all managers in the database, tracks approval requirements, and processes transactions when fully approved.
