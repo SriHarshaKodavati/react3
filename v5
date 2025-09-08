@@ -1,0 +1,3 @@
+POST http://localhost:8080/api/payroll2/create-batch
+Headers: Authorization: Bearer YOUR_JWT_TOKEN
+Body: [{"userId": 1, "employeeName": "Test", "amount": 1000, "remarks": "Test"}]
