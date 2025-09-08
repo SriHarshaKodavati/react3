@@ -1,0 +1,59 @@
+// Update the createBatch method in PayrollController2.java to handle mixed data types:
+
+@PostMapping("/create-batch")
+public ResponseEntity<Map<String, String>> createBatch(@RequestBody List<Map<String, Object>> transactionData,
+                                                       HttpServletRequest request) {
+    String userType = (String) request.getAttribute("userType");
+    Integer createdBy = (Integer) request.getAttribute("userId");
+    
+    if (!"MANAGER".equals(userType)) {
+        return ResponseEntity.status(403).build();
+    }
+    
+    try {
+        List<BatchTransaction2> transactions = transactionData.stream()
+            .map(data -> {
+                BatchTransaction2 txn = new BatchTransaction2();
+                
+                // Handle userId conversion - could be String or Integer
+                Object userIdObj = data.get("userId");
+                Integer userId;
+                if (userIdObj instanceof String) {
+                    userId = Integer.parseInt((String) userIdObj);
+                } else {
+                    userId = (Integer) userIdObj;
+                }
+                txn.setUserId(userId);
+                
+                txn.setEmployeeName((String) data.get("employeeName"));
+                
+                // Handle amount conversion - could be String or Number
+                Object amountObj = data.get("amount");
+                BigDecimal amount;
+                if (amountObj instanceof String) {
+                    amount = new BigDecimal((String) amountObj);
+                } else if (amountObj instanceof Number) {
+                    amount = new BigDecimal(amountObj.toString());
+                } else {
+                    amount = new BigDecimal(amountObj.toString());
+                }
+                txn.setAmount(amount);
+                
+                txn.setRemarks((String) data.get("remarks"));
+                return txn;
+            })
+            .toList();
+        
+        String batchReference = payrollService.createPayrollBatch(transactions, createdBy);
+        
+        Map<String, String> response = new HashMap<>();
+        response.put("message", "Payroll batch sent for approval to all managers");
+        response.put("batchReference", batchReference);
+        
+        return ResponseEntity.ok(response);
+    } catch (Exception e) {
+        Map<String, String> error = new HashMap<>();
+        error.put("error", e.getMessage());
+        return ResponseEntity.status(400).body(error);
+    }
+}
