@@ -1,0 +1,203 @@
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import ApiService from '../services/api';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+const PayrollHistory = () => {
+  const [payrollBatches, setPayrollBatches] = useState([]);
+  const [expandedBatch, setExpandedBatch] = useState(null);
+  const [batchTransactions, setBatchTransactions] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    fetchPayrollHistory();
+  }, []);
+
+  const fetchPayrollHistory = async () => {
+    try {
+      setLoading(true);
+      const batches = await ApiService.getPayrollHistory();
+      setPayrollBatches(batches);
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleBatchDetails = async (batchReference) => {
+    if (expandedBatch === batchReference) {
+      setExpandedBatch(null);
+      return;
+    }
+
+    try {
+      if (!batchTransactions[batchReference]) {
+        // Use getBatchTransactions instead of getBatchDetails
+        const transactions = await ApiService.getBatchTransactions(batchReference);
+        setBatchTransactions(prev => ({
+          ...prev,
+          [batchReference]: transactions
+        }));
+      }
+      setExpandedBatch(batchReference);
+    } catch (error) {
+      setError('Error fetching batch details: ' + error.message);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return '₹' + parseFloat(amount).toLocaleString('en-IN');
+  };
+
+  const formatDateTime = (dateTime) => {
+    return new Date(dateTime).toLocaleString('en-IN');
+  };
+
+  if (loading) {
+    return (
+      <div className="container mt-5 text-center">
+        <div className="spinner-border" role="status">
+          <span className="visually-hidden">Loading...</span>
+        </div>
+        <p className="mt-2">Loading payroll history...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="container mt-4">
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <h2>Payroll History</h2>
+        <button className="btn btn-secondary" onClick={() => navigate(-1)}>
+          Back
+        </button>
+      </div>
+
+      {error && (
+        <div className="alert alert-danger alert-dismissible">
+          {error}
+          <button 
+            onClick={() => setError('')} 
+            className="btn-close"
+            aria-label="Close"
+          ></button>
+        </div>
+      )}
+
+      {payrollBatches.length === 0 && !loading && (
+        <div className="alert alert-info">
+          No approved payroll batches found.
+        </div>
+      )}
+
+      <div className="row">
+        {payrollBatches.map((batch) => (
+          <div key={batch.batchReference} className="col-12 mb-3">
+            <div className="card border-0 shadow-sm">
+              <div className="card-header bg-success text-white">
+                <div className="row align-items-center">
+                  <div className="col-md-8">
+                    <h5 className="mb-0">
+                      <i className="fas fa-money-check-alt me-2"></i>
+                      {batch.batchReference}
+                    </h5>
+                    <small>Created: {formatDateTime(batch.createdAt)}</small>
+                  </div>
+                  <div className="col-md-4 text-end">
+                    <button
+                      className="btn btn-light btn-sm"
+                      onClick={() => toggleBatchDetails(batch.batchReference)}
+                    >
+                      {expandedBatch === batch.batchReference ? (
+                        <>
+                          <i className="fas fa-chevron-up me-1"></i>
+                          Hide Details
+                        </>
+                      ) : (
+                        <>
+                          <i className="fas fa-chevron-down me-1"></i>
+                          Show Details
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="card-body">
+                <div className="row">
+                  <div className="col-md-3">
+                    <strong>Total Amount:</strong><br/>
+                    <span className="text-success fs-5">{formatCurrency(batch.totalAmount)}</span>
+                  </div>
+                  <div className="col-md-3">
+                    <strong>Transactions:</strong><br/>
+                    <span className="badge bg-primary fs-6">{batch.totalTransactions}</span>
+                  </div>
+                  <div className="col-md-3">
+                    <strong>Status:</strong><br/>
+                    <span className="badge bg-success">{batch.status}</span>
+                  </div>
+                  <div className="col-md-3">
+                    <strong>Processed On:</strong><br/>
+                    <small>{formatDateTime(batch.processedAt)}</small>
+                  </div>
+                </div>
+
+                {/* Expanded Transaction Details */}
+                {expandedBatch === batch.batchReference && (
+                  <div className="mt-4">
+                    <h6 className="border-bottom pb-2">Individual Transactions</h6>
+                    {batchTransactions[batch.batchReference] ? (
+                      <div className="table-responsive">
+                        <table className="table table-sm">
+                          <thead className="table-light">
+                            <tr>
+                              <th>Employee</th>
+                              <th>User ID</th>
+                              <th>Amount</th>
+                              <th>Remarks</th>
+                              <th>Status</th>
+                              <th>Approved On</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {batchTransactions[batch.batchReference].map((txn) => (
+                              <tr key={txn.transactionId}>
+                                <td>{txn.employeeName}</td>
+                                <td>{txn.userId}</td>
+                                <td className="text-success">{formatCurrency(txn.amount)}</td>
+                                <td>{txn.remarks}</td>
+                                <td>
+                                  <span className="badge bg-success">{txn.status}</span>
+                                </td>
+                                <td>
+                                  <small>{formatDateTime(txn.approvedAt)}</small>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="text-center">
+                        <div className="spinner-border spinner-border-sm" role="status">
+                          <span className="visually-hidden">Loading...</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default PayrollHistory;
