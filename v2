@@ -1,0 +1,214 @@
+// src/components/Settings.js
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import ApiService from '../services/api';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
+const Settings = () => {
+  const [activeTab, setActiveTab] = useState('profile');
+  const [profile, setProfile] = useState({});
+  const [profileForm, setProfileForm] = useState({});
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    loadProfile();
+  }, []);
+
+  const loadProfile = async () => {
+    try {
+      const data = await ApiService.getUserProfile();
+      setProfile(data);
+      setProfileForm(data);
+      setLoading(false);
+    } catch (error) {
+      setError(error.message);
+      setLoading(false);
+    }
+  };
+
+  const handleProfileUpdate = async (e) => {
+    e.preventDefault();
+    try {
+      await ApiService.updateProfile(profileForm);
+      setMessage('Profile updated!');
+      setError('');
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  const handlePasswordChange = async (e) => {
+    e.preventDefault();
+    
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
+    try {
+      await ApiService.changePassword(passwordForm.currentPassword, passwordForm.newPassword);
+      setMessage('Password changed!');
+      setError('');
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+
+  if (loading) {
+    return <div className="container mt-5"><p>Loading...</p></div>;
+  }
+
+  return (
+    <div className="container mt-4">
+      <h2>Settings</h2>
+      
+      {message && <div className="alert alert-success">{message}</div>}
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      {/* Simple Tab Buttons */}
+      <div className="mb-3">
+        <button 
+          className={`btn ${activeTab === 'profile' ? 'btn-primary' : 'btn-outline-primary'} me-2`}
+          onClick={() => setActiveTab('profile')}
+        >
+          Profile
+        </button>
+        <button 
+          className={`btn ${activeTab === 'password' ? 'btn-primary' : 'btn-outline-primary'}`}
+          onClick={() => setActiveTab('password')}
+        >
+          Change Password
+        </button>
+      </div>
+
+      {/* Profile Tab */}
+      {activeTab === 'profile' && (
+        <div className="card">
+          <div className="card-body">
+            <h5>Profile Information</h5>
+            <form onSubmit={handleProfileUpdate}>
+              <div className="row">
+                <div className="col-md-6 mb-3">
+                  <label>First Name</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    value={profileForm.firstName || ''}
+                    onChange={(e) => setProfileForm({...profileForm, firstName: e.target.value})}
+                  />
+                </div>
+                <div className="col-md-6 mb-3">
+                  <label>Last Name</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    value={profileForm.lastName || ''}
+                    onChange={(e) => setProfileForm({...profileForm, lastName: e.target.value})}
+                  />
+                </div>
+              </div>
+              
+              <div className="row">
+                <div className="col-md-6 mb-3">
+                  <label>Email</label>
+                  <input
+                    type="email"
+                    className="form-control"
+                    value={profileForm.email || ''}
+                    onChange={(e) => setProfileForm({...profileForm, email: e.target.value})}
+                  />
+                </div>
+                <div className="col-md-6 mb-3">
+                  <label>Phone</label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    value={profileForm.phone || ''}
+                    onChange={(e) => setProfileForm({...profileForm, phone: e.target.value})}
+                  />
+                </div>
+              </div>
+
+              <div className="row">
+                <div className="col-md-4 mb-3">
+                  <label>Username</label>
+                  <input type="text" className="form-control" value={profile.username || ''} disabled />
+                </div>
+                <div className="col-md-4 mb-3">
+                  <label>Role</label>
+                  <input type="text" className="form-control" value={profile.userType || ''} disabled />
+                </div>
+                <div className="col-md-4 mb-3">
+                  <label>Department</label>
+                  <input type="text" className="form-control" value={profile.userDepartment || ''} disabled />
+                </div>
+              </div>
+
+              <button type="submit" className="btn btn-primary">Update Profile</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Password Tab */}
+      {activeTab === 'password' && (
+        <div className="card">
+          <div className="card-body">
+            <h5>Change Password</h5>
+            <form onSubmit={handlePasswordChange}>
+              <div className="mb-3">
+                <label>Current Password</label>
+                <input
+                  type="password"
+                  className="form-control"
+                  value={passwordForm.currentPassword}
+                  onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
+                  required
+                />
+              </div>
+
+              <div className="mb-3">
+                <label>New Password</label>
+                <input
+                  type="password"
+                  className="form-control"
+                  value={passwordForm.newPassword}
+                  onChange={(e) => setPasswordForm({...passwordForm, newPassword: e.target.value})}
+                  required
+                />
+              </div>
+
+              <div className="mb-3">
+                <label>Confirm New Password</label>
+                <input
+                  type="password"
+                  className="form-control"
+                  value={passwordForm.confirmPassword}
+                  onChange={(e) => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
+                  required
+                />
+              </div>
+
+              <button type="submit" className="btn btn-primary">Change Password</button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3">
+        <button className="btn btn-secondary" onClick={() => navigate(-1)}>Back</button>
+      </div>
+    </div>
+  );
+};
+
+export default Settings;
